@@ -40,6 +40,13 @@ void ledsUpdate()
         bool on = (now / 150) % 2 == 0;
         color = on ? strip.Color(255, 0, 0) : 0;
     }
+    else if (swingActive)
+    {
+        // Aufschwingen: schnelles Violett - unmissverstaendlich "Achtung, er
+        // bewegt sich gleich kraeftig".
+        bool on = (now / 90) % 2 == 0;
+        color = on ? strip.Color(160, 40, 220) : strip.Color(20, 0, 30);
+    }
     else if (running)
     {
         // Gruen bei kleinem Winkelfehler, wandert ueber Gelb nach Rot bei groesserem.

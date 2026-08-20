@@ -329,20 +329,47 @@ void autotuneTick(float dt, float angleErr, int pwm, float yaw, long pos)
     switch (phase)
     {
     case PH_WAIT_UPRIGHT:
-        // Erst anwerfen, wenn er ruhig genug steht, dass er sich fangen kann.
-        if (fabsf(angleDeg - trim) < ARM_ANGLE_DEG && fabsf(gyroRateDs) < 25.0f)
+        if (running)                     // wieder oben, egal wie
         {
+            phase = PH_SETTLE;
+            phaseText = "einschwingen";
+            phaseStart = now;
+            uprightSince = 0;
+            break;
+        }
+
+        // Liegt er innerhalb dessen, was das Aufschwingen schafft, richtet er
+        // sich selbst wieder auf - dann laeuft die Abstimmung ohne fremde
+        // Hilfe weiter. Sonst bleibt nur warten, bis ihn jemand hinstellt.
+        if (fabsf(angleDeg - trim) < upMax && upPwm > 0.0f)
+        {
+            phaseText = "aufschwingen";
+            // Nach drei misslungenen Anlaeufen gibt das Aufschwingen auf und
+            // nimmt requested zurueck. Erst nach einer Pause neu ansetzen,
+            // sonst haemmert der Automat endlos dagegen.
+            if (!requested && now - uprightSince > 3000)
+            {
+                requested = true;
+                fallFlag = false;
+                uprightSince = now;
+            }
+            else if (requested) uprightSince = now;
+        }
+        else if (fabsf(angleDeg - trim) < ARM_ANGLE_DEG && fabsf(gyroRateDs) < 25.0f)
+        {
+            phaseText = "aufstellen";
             if (uprightSince == 0) uprightSince = now;
             if (now - uprightSince >= UPRIGHT_HOLD_MS)
             {
                 requested = true;
                 fallFlag = false;
-                phase = PH_SETTLE;
-                phaseText = "einschwingen";
-                phaseStart = now;
             }
         }
-        else uprightSince = 0;
+        else
+        {
+            phaseText = "aufstellen";
+            uprightSince = 0;
+        }
         break;
 
     case PH_SETTLE:

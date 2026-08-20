@@ -193,6 +193,16 @@ float Vkp = 0.0f;    // je Impuls/s Geschwindigkeitsfehler  -> Sollwinkel
 float Vki = 0.0f;    // je Impuls Wegfehler                 -> Sollwinkel
 constexpr float TILT_BIAS_MAX = 4.0f;   // Sollwinkel hoechstens so weit kippen
 
+// Aufschwingen: Stellgroesse und groesster Winkel, aus dem er es versucht.
+// Beides live einstellbar, weil es vom Gewicht und vom Untergrund abhaengt -
+// auf Teppich braucht er mehr Schwung als auf Parkett.
+float upPwm = 200.0f;      // Stellgroesse beim Aufschwingen, 0..255
+float upMax = 60.0f;       // darueber gar nicht erst versuchen (Grad)
+bool  swingActive = false; // gerade am Aufschwingen
+int   swingTries  = 0;
+uint32_t swingStartMs = 0;
+uint32_t swingPauseUntilMs = 0;
+
 float tiltBias   = 0.0f;   // aktueller Versatz des Sollwinkels, Grad
 long  posTarget  = 0;      // Sollposition in Encoder-Impulsen
 float wheelSpeed = 0.0f;   // gefiltertes Tempo, Impulse/s
@@ -282,6 +292,8 @@ void saveParams()
     prefs.putFloat("ysign", yawSign);
     prefs.putFloat("vkp", Vkp);
     prefs.putFloat("vki", Vki);
+    prefs.putFloat("uppwm", upPwm);
+    prefs.putFloat("upmax", upMax);
     prefs.end();
     Serial.println(F("gespeichert"));
     webuiNotify("gespeichert");
@@ -301,6 +313,8 @@ void loadParams()
     yawSign = prefs.getFloat("ysign", yawSign);
     Vkp     = prefs.getFloat("vkp", Vkp);
     Vki     = prefs.getFloat("vki", Vki);
+    upPwm   = prefs.getFloat("uppwm", upPwm);
+    upMax   = prefs.getFloat("upmax", upMax);
     prefs.end();
 }
 
@@ -323,7 +337,9 @@ void printStatus()
     Serial.print(F(" v=")); Serial.print(wheelSpeed, 0);
     Serial.print(F(" bias=")); Serial.print(tiltBias, 2);
     Serial.print(F(" VP=")); Serial.print(Vkp, 4);
-    Serial.print(F(" VI=")); Serial.println(Vki, 4);
+    Serial.print(F(" VI=")); Serial.print(Vki, 4);
+    Serial.print(F(" UPPWM=")); Serial.print(upPwm, 0);
+    Serial.print(F(" UPMAX=")); Serial.println(upMax, 0);
 }
 
 void handleCommand(const String &cmdIn)
@@ -332,10 +348,11 @@ void handleCommand(const String &cmdIn)
     cmd.trim();
     if (cmd.length() == 0) return;
 
-    if (cmd == "START") { requested = true; fallFlag = false; }
+    if (cmd == "START") { requested = true; fallFlag = false; swingTries = 0; swingPauseUntilMs = 0; }
     else if (cmd == "STOP") {
         if (autotuneActive()) autotuneStop(true);
-        requested = false; running = false; motor::stop(); Serial.println(F("STOP"));
+        requested = false; running = false; swingActive = false; swingTries = 0;
+        motor::stop(); Serial.println(F("STOP"));
     }
     else if (cmd == "ZERO") { zeroAngle(); fallFlag = false; }
     else if (cmd == "STATUS") { printStatus(); }
@@ -349,6 +366,8 @@ void handleCommand(const String &cmdIn)
     else if (cmd.startsWith("YP=")) { Ykp = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("YD=")) { Ykd = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("YSIGN=")) { yawSign = cmd.substring(6).toFloat() >= 0 ? 1.0f : -1.0f; }
+    else if (cmd.startsWith("UPPWM=")) { upPwm = constrain(cmd.substring(6).toFloat(), 0.0f, 255.0f); }
+    else if (cmd.startsWith("UPMAX=")) { upMax = constrain(cmd.substring(6).toFloat(), 0.0f, 80.0f); }
     else if (cmd.startsWith("VP=")) { Vkp = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("VI=")) { Vki = cmd.substring(3).toFloat(); }
     else if (cmd == "HOME") { encoderReset(); posTarget = 0; Serial.println(F("Ausgangslage neu gesetzt")); }
@@ -365,6 +384,7 @@ void handleCommand(const String &cmdIn)
         Serial.println(F("START STOP ZERO STATUS T  P= I= D= MINPWM= TRIM= SIGN="));
         Serial.println(F("Gierregler: YP= YD= YSIGN=  (YP=0 YD=0 schaltet ihn ab)"));
         Serial.println(F("Positionsregler: VP= VI= HOME  (VP=0 VI=0 schaltet ihn ab)"));
+        Serial.println(F("Aufschwingen: UPPWM= UPMAX=  (UPPWM=0 schaltet es ab)"));
         Serial.println(F("SAVE LOAD - Parameter im Flash ablegen/zurueckholen"));
         Serial.println(F("TUNE - Abstimmung starten/beenden, TUNEOFF - abbrechen"));
     }
@@ -499,20 +519,32 @@ void loop()
     // den Sollwinkel um bis zu 4 Grad, und um so viel duerfen Sturz- und
     // Startgrenze nicht mitwandern.
     const float tiltFromTrim = angleDeg - trim;
-    if (fabsf(tiltFromTrim) > FALL_ANGLE_DEG)
+
+    // Die Sturzabschaltung gilt nur, WAEHREND er balanciert. Sonst koennte er
+    // sich nie aus einer Schraeglage aufschwingen - sie wuerde den Versuch
+    // sofort wieder abbrechen.
+    if (running && fabsf(tiltFromTrim) > FALL_ANGLE_DEG)
     {
-        if (running) { Serial.println(F("Umgefallen - Motoren aus.")); fallFlag = true; }
+        Serial.println(F("Umgefallen - Motoren aus."));
+        fallFlag = true;
         running = false;
         requested = false;
+        swingActive = false;
         motor::stop();
         integral = 0.0f;
         lastPwmOut = 0;
         lastSteer  = 0.0f;
         tiltBias   = 0.0f;
     }
-    else if (requested && !running && fabsf(tiltFromTrim) < ARM_ANGLE_DEG)
+    // Waehrend des Aufschwingens darf frueher uebernommen werden: der Roboter
+    // hat dann Schwung, und der Regler faengt ihn besser ab, solange er noch
+    // in Bewegung ist, als wenn man auf die enge Ruhelage wartet.
+    else if (requested && !running &&
+             fabsf(tiltFromTrim) < (swingActive ? SWINGUP_HANDOVER_DEG : ARM_ANGLE_DEG))
     {
         running = true;
+        swingActive = false;
+        swingTries  = 0;
         integral = 0.0f;
         yawDeg   = 0.0f;   // Richtung im Moment des Starts ist die Sollrichtung
         encoderReset();    // und der Standort im Moment des Starts die Sollposition
@@ -520,6 +552,48 @@ void loop()
         tiltBias  = 0.0f;
         motor::enable(true);
         Serial.println(F("START"));
+    }
+    else if (requested && !running)
+    {
+        // Steht er schraeg, erst aufschwingen. Mehr als upMax Grad schafft er
+        // mit einem einzigen Anlauf nicht - dann muss ihn jemand aufstellen.
+        if (fabsf(tiltFromTrim) < upMax && upPwm > 0.0f)
+        {
+            const uint32_t now = millis();
+            if (!swingActive && now >= swingPauseUntilMs)
+            {
+                if (swingTries >= SWINGUP_MAX_TRIES)
+                {
+                    requested = false;
+                    swingTries = 0;
+                    Serial.println(F("Aufschwingen misslungen - bitte aufstellen."));
+                    webuiNotify("Aufschwingen misslungen");
+                }
+                else
+                {
+                    swingActive  = true;
+                    swingTries++;
+                    swingStartMs = now;
+                    motor::enable(true);
+                    Serial.print(F("Aufschwingen, Versuch ")); Serial.println(swingTries);
+                }
+            }
+            else if (swingActive && now - swingStartMs >= SWINGUP_TIMEOUT_MS)
+            {
+                // Nicht hochgekommen: kurz absetzen, damit er zurueckpendeln
+                // kann, und es aus der neuen Lage noch einmal versuchen.
+                swingActive = false;
+                motor::stop();
+                lastPwmOut = 0;
+                swingPauseUntilMs = now + SWINGUP_PAUSE_MS;
+            }
+        }
+        else if (swingActive)
+        {
+            swingActive = false;
+            motor::stop();
+            lastPwmOut = 0;
+        }
     }
 
     // --- Regler ---
@@ -539,6 +613,20 @@ void loop()
 
         motor::set(constrain(lastPwmOut + (int)lastSteer, -255, 255),
                    constrain(lastPwmOut - (int)lastSteer, -255, 255));
+    }
+    else if (swingActive)
+    {
+        // In die Kipprichtung fahren: die Raeder laufen unter den Schwerpunkt,
+        // der Aufbau richtet sich auf. Wirkrichtung wie beim Balancieren, also
+        // ueber outSign - so muss dieses Vorzeichen nicht getrennt bestimmt
+        // werden. Nahe der Senkrechten wird zurueckgenommen, sonst schiesst er
+        // auf der anderen Seite darueber hinaus.
+        const float dir   = (tiltFromTrim > 0.0f) ? 1.0f : -1.0f;
+        const float scale = constrain(fabsf(tiltFromTrim) / 25.0f, 0.4f, 1.0f);
+        lastPwmOut = (int)(outSign * dir * upPwm * scale);
+        lastSteer  = 0.0f;
+        yawDeg     = 0.0f;
+        motor::set(lastPwmOut, lastPwmOut);
     }
     else
     {

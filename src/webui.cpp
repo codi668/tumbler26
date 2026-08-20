@@ -124,6 +124,11 @@ input[type=range]{width:100%;accent-color:var(--acc);margin:0}
 <div class="card"><h2>Balance</h2><div id="g1"></div></div>
 <div class="card"><h2>Richtung halten</h2><div id="g2"></div></div>
 <div class="card"><h2>Position halten</h2><div id="g3"></div></div>
+<div class="card"><h2>Aufschwingen</h2><div id="g4"></div>
+  <div class="sub">Steht er beim START schraeg, faehrt er sich selbst hoch.
+    UPPWM ist der Schwung, UPMAX der groesste Winkel, aus dem er es versucht
+    &mdash; UPPWM&nbsp;=&nbsp;0 schaltet es ab.</div>
+</div>
 
 <div id="toast"></div>
 
@@ -134,7 +139,8 @@ const P = [
   ['Kd','D',0,3,0.01,2,'g1'], ['minPwm','MINPWM',0,120,1,0,'g1'],
   ['trim','TRIM',-10,10,0.05,2,'g1'],
   ['Ykp','YP',0,15,0.1,1,'g2'], ['Ykd','YD',0,2,0.01,2,'g2'],
-  ['Vkp','VP',0,0.01,0.0002,4,'g3'], ['Vki','VI',0,0.004,0.0001,4,'g3']
+  ['Vkp','VP',0,0.01,0.0002,4,'g3'], ['Vki','VI',0,0.004,0.0001,4,'g3'],
+  ['upPwm','UPPWM',0,255,5,0,'g4'], ['upMax','UPMAX',0,80,1,0,'g4']
 ];
 const SIGNS = [['sign','SIGN','Motorrichtung','g1'],
                ['ysign','YSIGN','Drehrichtung','g2']];
@@ -247,7 +253,8 @@ function connect() {
     }
 
     const st = document.getElementById('state');
-    if (fall && !run)  { st.textContent = 'UMGEFALLEN'; st.className = 'fall'; }
+    if (p[28] === '1') { st.textContent = 'AUFSTEHEN';  st.className = 'wait'; }
+    else if (fall && !run)  { st.textContent = 'UMGEFALLEN'; st.className = 'fall'; }
     else if (run)      { st.textContent = 'BALANCIERT'; st.className = 'run'; }
     else if (req)      { st.textContent = 'WARTET';     st.className = 'wait'; }
     else               { st.textContent = 'AUS';        st.className = ''; }
@@ -258,7 +265,8 @@ function connect() {
 
     // Regler nur nachfuehren, solange niemand gerade daran zieht.
     const vals = {Kp:p[7],Ki:p[8],Kd:p[9],minPwm:p[10],trim:p[11],
-                  Ykp:p[15],Ykd:p[16],Vkp:p[21],Vki:p[22]};
+                  Ykp:p[15],Ykd:p[16],Vkp:p[21],Vki:p[22],
+                  upPwm:p[29],upMax:p[30]};
     for (const [id,,,,,dec] of P) {
       const el = document.getElementById(id);
       if (el !== document.activeElement) {
@@ -370,16 +378,17 @@ void webuiSendTelemetry()
 {
     if (ws.count() == 0) return;
 
-    char buf[340];
+    char buf[400];
     snprintf(buf, sizeof(buf),
              "T,%.2f,%.2f,%d,%d,%d,%d,%.2f,%.3f,%.2f,%.1f,%.2f,%.0f,%.2f,%d,%.2f,%.2f,%.0f"
-             ",%ld,%.0f,%.2f,%.4f,%.4f,%d,%d,%d,%.2f,%s",
+             ",%ld,%.0f,%.2f,%.4f,%.4f,%d,%d,%d,%.2f,%s,%d,%.0f,%.0f",
              angleDeg, gyroRateDs, lastPwmOut,
              running ? 1 : 0, requested ? 1 : 0, fallFlag ? 1 : 0,
              Kp, Ki, Kd, minPwm, trim, outSign,
              yawDeg, (int)lastSteer, Ykp, Ykd, yawSign,
              encoderPos() - posTarget, wheelSpeed, tiltBias, Vkp, Vki,
              autotuneActive() ? 1 : 0, autotuneStage(), autotuneTrial(),
-             autotuneBestCost(), autotunePhase());
+             autotuneBestCost(), autotunePhase(),
+             swingActive ? 1 : 0, upPwm, upMax);
     ws.textAll(buf);
 }

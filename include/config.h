@@ -43,8 +43,21 @@ constexpr int PIN_BUTTON = 2;
 //  Sicherheit
 // ===========================================================================
 constexpr float FALL_ANGLE_DEG    = 35.0f;  // darueber: Motoren sofort aus
-constexpr float ARM_ANGLE_DEG     = 5.0f;   // erst darunter darf gestartet werden
+constexpr float ARM_ANGLE_DEG     = 5.0f;   // darunter uebernimmt der Balanceregler
 constexpr uint32_t LOOP_PERIOD_US = 5000;   // 200 Hz Regeltakt
+
+// ===========================================================================
+//  Aufschwingen
+// ===========================================================================
+// Steht der Roboter beim START schraeg, faehrt er die Raeder kraeftig in die
+// Kipprichtung: damit wandert die Aufstandsflaeche unter den Schwerpunkt und
+// der Aufbau richtet sich auf. Es ist dieselbe Wirkrichtung wie beim
+// Balancieren, nur mit voller Stellgroesse - deshalb wird sie auch aus
+// outSign abgeleitet und muss nicht getrennt bestimmt werden.
+constexpr float    SWINGUP_HANDOVER_DEG = 9.0f;   // ab hier uebernimmt die Regelung
+constexpr uint32_t SWINGUP_TIMEOUT_MS   = 2000;   // ein Versuch dauert hoechstens so lang
+constexpr uint32_t SWINGUP_PAUSE_MS     = 1200;   // Pause zwischen zwei Versuchen
+constexpr int      SWINGUP_MAX_TRIES    = 3;
 
 // ===========================================================================
 //  Statusanzeige: 8x WS2812 (Sheet3 des Schaltplans)

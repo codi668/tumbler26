@@ -18,6 +18,10 @@ extern float yawDeg;
 extern float lastSteer;
 extern float Ykp, Ykd, yawSign;
 
+// Aufschwingen aus einer Schraeglage
+extern bool  swingActive;
+extern float upPwm, upMax;
+
 // Positionsregler: holt den Roboter ueber die Encoder an den Startpunkt zurueck
 extern float tiltBias;
 extern float wheelSpeed;
