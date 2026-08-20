@@ -32,6 +32,7 @@
 #include "leds.h"
 #include "webui.h"
 #include "encoder.h"
+#include "autotune.h"
 
 // ---------------------------------------------------------------------------
 // MPU6050 - direkter Registerzugriff, keine externe Bibliothek
@@ -158,7 +159,7 @@ void stop()
 float Kp      = 28.0f;
 float Ki      = 0.0f;
 float Kd      = 0.65f;
-int   minPwm  = 50;      // darunter bewegt sich der Roboter unter Eigengewicht nicht
+float minPwm  = 50.0f;   // darunter bewegt sich der Roboter unter Eigengewicht nicht
 float trim    = 0.0f;    // Sollwinkel-Offset, mit ZERO bzw. TRIM= einstellbar
 float outSign = -1.0f;
 
@@ -273,7 +274,7 @@ void saveParams()
     prefs.putFloat("kp", Kp);
     prefs.putFloat("ki", Ki);
     prefs.putFloat("kd", Kd);
-    prefs.putInt("minpwm", minPwm);
+    prefs.putFloat("minpwm2", minPwm);
     prefs.putFloat("trim", trim);
     prefs.putFloat("sign", outSign);
     prefs.putFloat("ykp", Ykp);
@@ -292,7 +293,7 @@ void loadParams()
     Kp      = prefs.getFloat("kp", Kp);
     Ki      = prefs.getFloat("ki", Ki);
     Kd      = prefs.getFloat("kd", Kd);
-    minPwm  = prefs.getInt("minpwm", minPwm);
+    minPwm  = prefs.getFloat("minpwm2", minPwm);
     trim    = prefs.getFloat("trim", trim);
     outSign = prefs.getFloat("sign", outSign);
     Ykp     = prefs.getFloat("ykp", Ykp);
@@ -311,7 +312,7 @@ void printStatus()
     Serial.print(F(" Kp=")); Serial.print(Kp, 2);
     Serial.print(F(" Ki=")); Serial.print(Ki, 3);
     Serial.print(F(" Kd=")); Serial.print(Kd, 2);
-    Serial.print(F(" minPwm=")); Serial.print(minPwm);
+    Serial.print(F(" minPwm=")); Serial.print(minPwm, 1);
     Serial.print(F(" trim=")); Serial.print(trim, 2);
     Serial.print(F(" sign=")); Serial.println(outSign, 0);
     Serial.print(F("yaw=")); Serial.print(yawDeg, 2);
@@ -332,14 +333,17 @@ void handleCommand(const String &cmdIn)
     if (cmd.length() == 0) return;
 
     if (cmd == "START") { requested = true; fallFlag = false; }
-    else if (cmd == "STOP") { requested = false; running = false; motor::stop(); Serial.println(F("STOP")); }
+    else if (cmd == "STOP") {
+        if (autotuneActive()) autotuneStop(true);
+        requested = false; running = false; motor::stop(); Serial.println(F("STOP"));
+    }
     else if (cmd == "ZERO") { zeroAngle(); fallFlag = false; }
     else if (cmd == "STATUS") { printStatus(); }
     else if (cmd == "T") { telemetry = !telemetry; }
     else if (cmd.startsWith("P=")) { Kp = cmd.substring(2).toFloat(); }
     else if (cmd.startsWith("I=")) { Ki = cmd.substring(2).toFloat(); }
     else if (cmd.startsWith("D=")) { Kd = cmd.substring(2).toFloat(); }
-    else if (cmd.startsWith("MINPWM=")) { minPwm = cmd.substring(7).toInt(); }
+    else if (cmd.startsWith("MINPWM=")) { minPwm = cmd.substring(7).toFloat(); }
     else if (cmd.startsWith("TRIM=")) { trim = cmd.substring(5).toFloat(); }
     else if (cmd.startsWith("SIGN=")) { outSign = cmd.substring(5).toFloat() >= 0 ? 1.0f : -1.0f; }
     else if (cmd.startsWith("YP=")) { Ykp = cmd.substring(3).toFloat(); }
@@ -351,6 +355,10 @@ void handleCommand(const String &cmdIn)
     else if (cmd.startsWith("RATE=")) {
         telemetryPeriodMs = constrain(cmd.substring(5).toInt(), 10, 1000);
     }
+    else if (cmd == "TUNE") {
+        if (autotuneActive()) autotuneStop(true); else autotuneStart();
+    }
+    else if (cmd == "TUNEOFF") { autotuneStop(false); }
     else if (cmd == "SAVE") { saveParams(); }
     else if (cmd == "LOAD") { loadParams(); printStatus(); }
     else if (cmd == "?") {
@@ -358,6 +366,7 @@ void handleCommand(const String &cmdIn)
         Serial.println(F("Gierregler: YP= YD= YSIGN=  (YP=0 YD=0 schaltet ihn ab)"));
         Serial.println(F("Positionsregler: VP= VI= HOME  (VP=0 VI=0 schaltet ihn ab)"));
         Serial.println(F("SAVE LOAD - Parameter im Flash ablegen/zurueckholen"));
+        Serial.println(F("TUNE - Abstimmung starten/beenden, TUNEOFF - abbrechen"));
     }
     else {
         Serial.print(F("? unbekannt: ")); Serial.println(cmd);
@@ -537,6 +546,8 @@ void loop()
         lastSteer  = 0.0f;
         yawDeg     = 0.0f;   // im Stillstand nicht aufsummieren
     }
+
+    autotuneTick(dt, angleErr, lastPwmOut, yawDeg, encoderPos());
 
     if (telemetry)
     {

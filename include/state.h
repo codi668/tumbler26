@@ -11,7 +11,7 @@ extern bool  fallFlag;
 extern int   lastPwmOut;
 
 extern float Kp, Ki, Kd, trim, outSign;
-extern int   minPwm;
+extern float minPwm;
 
 // Gierregler: haelt die Blickrichtung ueber Gyro-Z
 extern float yawDeg;

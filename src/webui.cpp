@@ -3,6 +3,7 @@
 #include "state.h"
 
 #include "encoder.h"
+#include "autotune.h"
 
 #include <WiFi.h>
 #include <ESPmDNS.h>
@@ -106,6 +107,18 @@ input[type=range]{width:100%;accent-color:var(--acc);margin:0}
   <button class="alt" onclick="cmd('ZERO')">ZERO</button>
   <button class="alt" onclick="cmd('HOME')">HOME</button>
   <button class="alt" onclick="cmd('SAVE')">SAVE</button>
+</div>
+
+<div class="row">
+  <button class="alt" id="tuneBtn" onclick="cmd('TUNE')">AUTO-ABSTIMMUNG</button>
+</div>
+<div class="card" id="tuneBox" style="display:none">
+  <h2>Abstimmung laeuft</h2>
+  <div class="sub" id="tuneInfo">--</div>
+  <div class="sub" style="margin-top:6px">
+    Er muss dabei durchgehend balancieren &mdash; nach einem Sturz bitte wieder
+    aufstellen, dann macht er von selbst weiter.
+  </div>
 </div>
 
 <div class="card"><h2>Balance</h2><div id="g1"></div></div>
@@ -217,6 +230,21 @@ function connect() {
       ' · Lenkung ' + steer + ' · Weg ' + pos + ' · Soll ' + bias.toFixed(1) + '°';
     document.getElementById('bot').setAttribute(
       'transform', 'rotate(' + (-ang).toFixed(1) + ' 50 58)');
+
+    // Abstimmung: Felder 23..27
+    const tuning = p[23] === '1';
+    const box = document.getElementById('tuneBox');
+    const btn = document.getElementById('tuneBtn');
+    box.style.display = tuning ? '' : 'none';
+    btn.textContent = tuning ? 'ABSTIMMUNG BEENDEN' : 'AUTO-ABSTIMMUNG';
+    btn.className = tuning ? 'stop' : 'alt';
+    if (tuning) {
+      const namen = ['Balance','minPwm','Richtung','Position','Feinschliff'];
+      document.getElementById('tuneInfo').textContent =
+        'Stufe ' + (+p[24]+1) + '/5 ' + (namen[+p[24]] || '') +
+        ' \u00b7 ' + p[27] + ' \u00b7 ' + p[25] + ' Versuche \u00b7 bester Wert ' +
+        (+p[26]).toFixed(2);
+    }
 
     const st = document.getElementById('state');
     if (fall && !run)  { st.textContent = 'UMGEFALLEN'; st.className = 'fall'; }
@@ -342,14 +370,16 @@ void webuiSendTelemetry()
 {
     if (ws.count() == 0) return;
 
-    char buf[280];
+    char buf[340];
     snprintf(buf, sizeof(buf),
-             "T,%.2f,%.2f,%d,%d,%d,%d,%.2f,%.3f,%.2f,%d,%.2f,%.0f,%.2f,%d,%.2f,%.2f,%.0f"
-             ",%ld,%.0f,%.2f,%.4f,%.4f",
+             "T,%.2f,%.2f,%d,%d,%d,%d,%.2f,%.3f,%.2f,%.1f,%.2f,%.0f,%.2f,%d,%.2f,%.2f,%.0f"
+             ",%ld,%.0f,%.2f,%.4f,%.4f,%d,%d,%d,%.2f,%s",
              angleDeg, gyroRateDs, lastPwmOut,
              running ? 1 : 0, requested ? 1 : 0, fallFlag ? 1 : 0,
              Kp, Ki, Kd, minPwm, trim, outSign,
              yawDeg, (int)lastSteer, Ykp, Ykd, yawSign,
-             encoderPos() - posTarget, wheelSpeed, tiltBias, Vkp, Vki);
+             encoderPos() - posTarget, wheelSpeed, tiltBias, Vkp, Vki,
+             autotuneActive() ? 1 : 0, autotuneStage(), autotuneTrial(),
+             autotuneBestCost(), autotunePhase());
     ws.textAll(buf);
 }
