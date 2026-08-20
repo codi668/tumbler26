@@ -18,6 +18,10 @@ extern float yawDeg;
 extern float lastSteer;
 extern float Ykp, Ykd, yawSign;
 
+// Fahrbetrieb: Sollgeschwindigkeit und Solldrehrate
+extern float driveWish, driveSpeed, turnRate, yawTarget;
+extern float Dkp, Dki;
+
 // Aufschwingen aus einer Schraeglage
 extern bool  swingActive;
 extern float upPwm, upMax;

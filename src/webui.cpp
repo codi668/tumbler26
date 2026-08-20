@@ -124,11 +124,31 @@ input[type=range]{width:100%;accent-color:var(--acc);margin:0}
 <div class="card"><h2>Balance</h2><div id="g1"></div></div>
 <div class="card"><h2>Richtung halten</h2><div id="g2"></div></div>
 <div class="card"><h2>Position halten</h2><div id="g3"></div></div>
+<div class="card"><h2>Fahren</h2>
+  <div class="p">
+    <div class="plabel"><span>Tempo</span><span class="pval" id="vspd">1500</span></div>
+    <input type="range" id="spd" min="200" max="4000" step="100" value="1500">
+  </div>
+  <div class="row" style="margin-bottom:8px">
+    <button class="alt" onclick="drive(-1)">&#9660; ZUR&Uuml;CK</button>
+    <button class="stop" onclick="cmd('HALT')">HALT</button>
+    <button class="alt" onclick="drive(1)">VOR &#9650;</button>
+  </div>
+  <div class="row" style="margin-bottom:0">
+    <button class="alt" onclick="cmd('TURN=-45')">&#8634; LINKS</button>
+    <button class="alt" onclick="cmd('TURN=0')">GERADE</button>
+    <button class="alt" onclick="cmd('TURN=45')">RECHTS &#8635;</button>
+  </div>
+  <div class="sub" id="driveInfo" style="margin-top:8px">steht</div>
+</div>
+
 <div class="card"><h2>Aufschwingen</h2><div id="g4"></div>
   <div class="sub">Steht er beim START schraeg, faehrt er sich selbst hoch.
     UPPWM ist der Schwung, UPMAX der groesste Winkel, aus dem er es versucht
     &mdash; UPPWM&nbsp;=&nbsp;0 schaltet es ab.</div>
 </div>
+
+<div class="card"><h2>Fahrregler</h2><div id="g5"></div></div>
 
 <div id="toast"></div>
 
@@ -140,7 +160,8 @@ const P = [
   ['trim','TRIM',-10,10,0.05,2,'g1'],
   ['Ykp','YP',0,15,0.1,1,'g2'], ['Ykd','YD',0,2,0.01,2,'g2'],
   ['Vkp','VP',0,0.01,0.0002,4,'g3'], ['Vki','VI',0,0.004,0.0001,4,'g3'],
-  ['upPwm','UPPWM',0,255,5,0,'g4'], ['upMax','UPMAX',0,80,1,0,'g4']
+  ['upPwm','UPPWM',0,255,5,0,'g4'], ['upMax','UPMAX',0,80,1,0,'g4'],
+  ['Dkp','DP',0,0.01,0.0002,4,'g5'], ['Dki','DI',0,0.004,0.0001,4,'g5']
 ];
 const SIGNS = [['sign','SIGN','Motorrichtung','g1'],
                ['ysign','YSIGN','Drehrichtung','g2']];
@@ -212,6 +233,11 @@ function toast(m) {
   clearTimeout(toastT); toastT = setTimeout(() => t.className = '', 1800);
 }
 function cmd(c) { if (ws && ws.readyState === 1) ws.send(c); }
+const spd = document.getElementById('spd');
+spd.addEventListener('input', e => {
+  document.getElementById('vspd').textContent = e.target.value;
+});
+function drive(richtung) { cmd('FWD=' + richtung * spd.value); }
 function setConn(up) {
   document.getElementById('dot').className = up ? 'up' : '';
   document.getElementById('connt').textContent = up ? 'verbunden' : 'getrennt';
@@ -252,6 +278,14 @@ function connect() {
         (+p[26]).toFixed(2);
     }
 
+    // Fahrzustand: Felder 31..33
+    const soll = +p[32], ist = +p[31], dreh = +p[33];
+    document.getElementById('driveInfo').textContent =
+      (Math.abs(soll) < 1 && Math.abs(ist) < 1)
+        ? 'steht'
+        : 'Soll ' + soll + ' \u00b7 ist ' + ist + ' Impulse/s' +
+          (Math.abs(dreh) > 0.5 ? ' \u00b7 Drehung ' + dreh + '\u00b0/s' : ' \u00b7 geradeaus');
+
     const st = document.getElementById('state');
     if (p[28] === '1') { st.textContent = 'AUFSTEHEN';  st.className = 'wait'; }
     else if (fall && !run)  { st.textContent = 'UMGEFALLEN'; st.className = 'fall'; }
@@ -266,7 +300,7 @@ function connect() {
     // Regler nur nachfuehren, solange niemand gerade daran zieht.
     const vals = {Kp:p[7],Ki:p[8],Kd:p[9],minPwm:p[10],trim:p[11],
                   Ykp:p[15],Ykd:p[16],Vkp:p[21],Vki:p[22],
-                  upPwm:p[29],upMax:p[30]};
+                  upPwm:p[29],upMax:p[30],Dkp:p[34],Dki:p[35]};
     for (const [id,,,,,dec] of P) {
       const el = document.getElementById(id);
       if (el !== document.activeElement) {
@@ -378,10 +412,10 @@ void webuiSendTelemetry()
 {
     if (ws.count() == 0) return;
 
-    char buf[400];
+    char buf[460];
     snprintf(buf, sizeof(buf),
              "T,%.2f,%.2f,%d,%d,%d,%d,%.2f,%.3f,%.2f,%.1f,%.2f,%.0f,%.2f,%d,%.2f,%.2f,%.0f"
-             ",%ld,%.0f,%.2f,%.4f,%.4f,%d,%d,%d,%.2f,%s,%d,%.0f,%.0f",
+             ",%ld,%.0f,%.2f,%.4f,%.4f,%d,%d,%d,%.2f,%s,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%.4f,%.4f",
              angleDeg, gyroRateDs, lastPwmOut,
              running ? 1 : 0, requested ? 1 : 0, fallFlag ? 1 : 0,
              Kp, Ki, Kd, minPwm, trim, outSign,
@@ -389,6 +423,7 @@ void webuiSendTelemetry()
              encoderPos() - posTarget, wheelSpeed, tiltBias, Vkp, Vki,
              autotuneActive() ? 1 : 0, autotuneStage(), autotuneTrial(),
              autotuneBestCost(), autotunePhase(),
-             swingActive ? 1 : 0, upPwm, upMax);
+             swingActive ? 1 : 0, upPwm, upMax,
+             driveSpeed, driveWish, turnRate, Dkp, Dki);
     ws.textAll(buf);
 }

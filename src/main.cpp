@@ -203,6 +203,19 @@ int   swingTries  = 0;
 uint32_t swingStartMs = 0;
 uint32_t swingPauseUntilMs = 0;
 
+// Fahrbetrieb. Ein Balancierer faehrt, indem er sich in Fahrtrichtung lehnt -
+// eine Sollgeschwindigkeit wird also nicht aufs PWM gegeben, sondern ueber den
+// SOLLWINKEL gestellt, genau wie beim Positionsregler. Die Spur haelt dabei
+// der Gierregler; "geradeaus" heisst schlicht Solldrehrate null.
+float Dkp = 0.0020f;       // Grad Neigung je Impuls/s Geschwindigkeitsfehler
+float Dki = 0.0008f;       // I-Anteil, faengt Steigung und Rollwiderstand ab
+float driveWish   = 0.0f;  // was verlangt wurde, Impulse/s
+float driveSpeed  = 0.0f;  // was gerade gestellt wird (angerampt)
+float driveAccel  = 2500.0f;  // Impulse/s^2 - ein Sprung wuerde ihn ausheben
+float driveInt    = 0.0f;
+float turnRate    = 0.0f;  // Solldrehrate, Grad/s (0 = geradeaus)
+float yawTarget   = 0.0f;  // Sollrichtung, laeuft mit turnRate mit
+
 float tiltBias   = 0.0f;   // aktueller Versatz des Sollwinkels, Grad
 long  posTarget  = 0;      // Sollposition in Encoder-Impulsen
 float wheelSpeed = 0.0f;   // gefiltertes Tempo, Impulse/s
@@ -294,6 +307,8 @@ void saveParams()
     prefs.putFloat("vki", Vki);
     prefs.putFloat("uppwm", upPwm);
     prefs.putFloat("upmax", upMax);
+    prefs.putFloat("dkp", Dkp);
+    prefs.putFloat("dki", Dki);
     prefs.end();
     Serial.println(F("gespeichert"));
     webuiNotify("gespeichert");
@@ -315,6 +330,8 @@ void loadParams()
     Vki     = prefs.getFloat("vki", Vki);
     upPwm   = prefs.getFloat("uppwm", upPwm);
     upMax   = prefs.getFloat("upmax", upMax);
+    Dkp     = prefs.getFloat("dkp", Dkp);
+    Dki     = prefs.getFloat("dki", Dki);
     prefs.end();
 }
 
@@ -340,6 +357,11 @@ void printStatus()
     Serial.print(F(" VI=")); Serial.print(Vki, 4);
     Serial.print(F(" UPPWM=")); Serial.print(upPwm, 0);
     Serial.print(F(" UPMAX=")); Serial.println(upMax, 0);
+    Serial.print(F("fahrt=")); Serial.print(driveSpeed, 0);
+    Serial.print(F("/")); Serial.print(driveWish, 0);
+    Serial.print(F(" turn=")); Serial.print(turnRate, 0);
+    Serial.print(F(" DP=")); Serial.print(Dkp, 4);
+    Serial.print(F(" DI=")); Serial.println(Dki, 4);
 }
 
 void handleCommand(const String &cmdIn)
@@ -352,6 +374,8 @@ void handleCommand(const String &cmdIn)
     else if (cmd == "STOP") {
         if (autotuneActive()) autotuneStop(true);
         requested = false; running = false; swingActive = false; swingTries = 0;
+        driveWish = driveSpeed = driveInt = 0.0f;
+        turnRate = yawTarget = 0.0f;
         motor::stop(); Serial.println(F("STOP"));
     }
     else if (cmd == "ZERO") { zeroAngle(); fallFlag = false; }
@@ -366,6 +390,11 @@ void handleCommand(const String &cmdIn)
     else if (cmd.startsWith("YP=")) { Ykp = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("YD=")) { Ykd = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("YSIGN=")) { yawSign = cmd.substring(6).toFloat() >= 0 ? 1.0f : -1.0f; }
+    else if (cmd.startsWith("FWD="))  { driveWish = constrain(cmd.substring(4).toFloat(), -6000.0f, 6000.0f); }
+    else if (cmd.startsWith("TURN=")) { turnRate  = constrain(cmd.substring(5).toFloat(), -180.0f, 180.0f); }
+    else if (cmd == "HALT") { driveWish = 0.0f; turnRate = 0.0f; }
+    else if (cmd.startsWith("DP=")) { Dkp = cmd.substring(3).toFloat(); }
+    else if (cmd.startsWith("DI=")) { Dki = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("UPPWM=")) { upPwm = constrain(cmd.substring(6).toFloat(), 0.0f, 255.0f); }
     else if (cmd.startsWith("UPMAX=")) { upMax = constrain(cmd.substring(6).toFloat(), 0.0f, 80.0f); }
     else if (cmd.startsWith("VP=")) { Vkp = cmd.substring(3).toFloat(); }
@@ -385,6 +414,7 @@ void handleCommand(const String &cmdIn)
         Serial.println(F("Gierregler: YP= YD= YSIGN=  (YP=0 YD=0 schaltet ihn ab)"));
         Serial.println(F("Positionsregler: VP= VI= HOME  (VP=0 VI=0 schaltet ihn ab)"));
         Serial.println(F("Aufschwingen: UPPWM= UPMAX=  (UPPWM=0 schaltet es ab)"));
+        Serial.println(F("Fahren: FWD=<Impulse/s> TURN=<Grad/s> HALT  DP= DI="));
         Serial.println(F("SAVE LOAD - Parameter im Flash ablegen/zurueckholen"));
         Serial.println(F("TUNE - Abstimmung starten/beenden, TUNEOFF - abbrechen"));
     }
@@ -486,17 +516,38 @@ void loop()
     // --- Positionsregler: verschiebt den Sollwinkel ---
     encoderPoll(dt);
     wheelSpeed = encoderSpeed();
-    if (running && (Vkp != 0.0f || Vki != 0.0f))
+
+    // Sollgeschwindigkeit anrampen statt springen zu lassen: ein Sprung
+    // verlangt sofort vollen Neigungsversatz und hebt ihm die Raeder weg.
+    const float dv = driveAccel * dt;
+    driveSpeed += constrain(driveWish - driveSpeed, -dv, dv);
+
+    const bool driving = running && (fabsf(driveWish) > 1.0f || fabsf(driveSpeed) > 1.0f);
+
+    if (driving)
+    {
+        // Fahrbetrieb: auf Geschwindigkeit regeln. Schneller werden heisst
+        // weiter nach vorne lehnen, deshalb geht der Fehler mit positivem
+        // Vorzeichen in den Sollwinkel.
+        const float speedErr = driveSpeed - wheelSpeed;
+        driveInt = constrain(driveInt + speedErr * dt, -4000.0f, 4000.0f);
+        tiltBias = constrain(Dkp * speedErr + Dki * driveInt,
+                             -TILT_BIAS_MAX, TILT_BIAS_MAX);
+        posTarget = encoderPos();   // im Fahren zieht ihn nichts zum Start zurueck
+    }
+    else if (running && (Vkp != 0.0f || Vki != 0.0f))
     {
         const float posErr = (float)(encoderPos() - posTarget);
         // Vorzeichen: ist der Roboter zu weit VORNE (posErr positiv), muss er
         // zurueck - also nach hinten lehnen, der Sollwinkel geht ins Negative.
         float bias = -(Vki * posErr + Vkp * wheelSpeed);
         tiltBias = constrain(bias, -TILT_BIAS_MAX, TILT_BIAS_MAX);
+        driveInt = 0.0f;
     }
     else
     {
         tiltBias = 0.0f;
+        driveInt = 0.0f;
     }
 
     float angleErr = angleDeg - trim - tiltBias;
@@ -514,6 +565,12 @@ void loop()
     yawDeg += yawRateDs * dt;
     yawDeg -= yawDeg * (dt / YAW_LEAK_S);
 
+    // Sollrichtung: bei turnRate = 0 bleibt sie stehen, der Gierregler haelt
+    // die Spur - das ist das Geradeausfahren. Sie leckt mit derselben
+    // Zeitkonstante wie der Istwert, sonst liefen beide auseinander.
+    yawTarget += turnRate * dt;
+    yawTarget -= yawTarget * (dt / YAW_LEAK_S);
+
     // --- Sicherheit ---
     // Bewusst die echte Neigung, nicht angleErr: der Positionsregler verschiebt
     // den Sollwinkel um bis zu 4 Grad, und um so viel duerfen Sturz- und
@@ -530,6 +587,8 @@ void loop()
         running = false;
         requested = false;
         swingActive = false;
+        driveWish = driveSpeed = driveInt = 0.0f;
+        turnRate = yawTarget = 0.0f;
         motor::stop();
         integral = 0.0f;
         lastPwmOut = 0;
@@ -545,6 +604,8 @@ void loop()
         running = true;
         swingActive = false;
         swingTries  = 0;
+        driveWish = driveSpeed = driveInt = 0.0f;   // nie fahrend losstarten
+        turnRate  = yawTarget  = 0.0f;
         integral = 0.0f;
         yawDeg   = 0.0f;   // Richtung im Moment des Starts ist die Sollrichtung
         encoderReset();    // und der Standort im Moment des Starts die Sollposition
@@ -608,7 +669,8 @@ void loop()
         // Gierregler: PD auf Richtungsfehler und Drehrate. Bewusst NACH der
         // Totzonen-Spreizung addiert - die gilt fuer den Vortrieb, die
         // Raddifferenz soll unveraendert durchkommen.
-        float steer = yawSign * (Ykp * yawDeg + Ykd * yawRateDs);
+        float steer = yawSign * (Ykp * (yawDeg - yawTarget)
+                                 + Ykd * (yawRateDs - turnRate));
         lastSteer = constrain(steer, -YAW_MAX_STEER, YAW_MAX_STEER);
 
         motor::set(constrain(lastPwmOut + (int)lastSteer, -255, 255),
