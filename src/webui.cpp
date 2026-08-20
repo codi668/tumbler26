@@ -5,6 +5,8 @@
 #include "encoder.h"
 #include "autotune.h"
 
+#include <stdarg.h>
+
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
@@ -15,6 +17,14 @@ namespace {
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
+
+// Ringpuffer fuers Ereignisprotokoll. Feste Groesse statt String-Liste: der
+// ESP32 fragmentiert sonst ueber Stunden den Heap.
+constexpr int  LOG_LINES = 24;
+constexpr int  LOG_WIDTH = 72;
+char     logBuf[LOG_LINES][LOG_WIDTH];
+uint32_t logTime[LOG_LINES];
+int      logHead = 0, logCount = 0;
 
 // Eine einzige Seite, komplett im Flash - kein separates Dateisystem noetig.
 const char PAGE_HTML[] = R"HTML(
@@ -150,6 +160,11 @@ input[type=range]{width:100%;accent-color:var(--acc);margin:0}
 
 <div class="card"><h2>Fahrregler</h2><div id="g5"></div></div>
 
+<div class="card"><h2>Was er tut</h2>
+  <div id="log" style="font-family:ui-monospace,monospace;font-size:.72em;
+    line-height:1.5;color:var(--dim);max-height:190px;overflow-y:auto"></div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -249,6 +264,17 @@ function connect() {
   ws.onmessage = e => {
     const p = e.data.split(',');
     if (p[0] === 'M') { toast(p[1]); return; }
+    if (p[0] === 'L') {
+      // L,<ms>,<text> - Text kann selbst Kommas enthalten, deshalb erst ab 2
+      const el = document.getElementById('log');
+      const t = (+p[1]/1000).toFixed(1).padStart(7);
+      const line = document.createElement('div');
+      line.textContent = t + 's  ' + p.slice(2).join(',');
+      el.appendChild(line);
+      while (el.childElementCount > 60) el.removeChild(el.firstChild);
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
     if (p[0] !== 'T') return;
     // T,winkel,rate,pwm,laeuft,angefordert,sturz,Kp,Ki,Kd,minPwm,trim,sign,
     //   gier,lenkung,Ykp,Ykd,ysign
@@ -323,6 +349,19 @@ connect();
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
                AwsEventType type, void *arg, uint8_t *data, size_t len)
 {
+    if (type == WS_EVT_CONNECT)
+    {
+        // Wer sich neu verbindet, soll nicht vor einem leeren Protokoll sitzen.
+        const int start = (logHead - logCount + LOG_LINES) % LOG_LINES;
+        for (int i = 0; i < logCount; i++)
+        {
+            const int k = (start + i) % LOG_LINES;
+            char out[LOG_WIDTH + 24];
+            snprintf(out, sizeof(out), "L,%lu,%s", (unsigned long)logTime[k], logBuf[k]);
+            client->text(out);
+        }
+        return;
+    }
     if (type != WS_EVT_DATA) return;
     AwsFrameInfo *info = (AwsFrameInfo *)arg;
     if (!info->final || info->index != 0 || info->len != len) return; // nur kurze Einzelframes
@@ -331,6 +370,7 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
     String msg;
     msg.reserve(len);
     for (size_t i = 0; i < len; i++) msg += (char)data[i];
+    webuiLogf("< %s", msg.c_str());     // was die Oberflaeche geschickt hat
     handleCommand(msg);
 }
 
@@ -398,6 +438,32 @@ void webuiLoop()
         lastCleanupMs = now;
         ws.cleanupClients();
     }
+}
+
+void webuiLog(const char *msg)
+{
+    strncpy(logBuf[logHead], msg, LOG_WIDTH - 1);
+    logBuf[logHead][LOG_WIDTH - 1] = '\0';
+    logTime[logHead] = millis();
+
+    char out[LOG_WIDTH + 24];
+    snprintf(out, sizeof(out), "L,%lu,%s", (unsigned long)logTime[logHead], logBuf[logHead]);
+    if (ws.count() > 0) ws.textAll(out);
+
+    Serial.print(F("[log] ")); Serial.println(logBuf[logHead]);
+
+    logHead = (logHead + 1) % LOG_LINES;
+    if (logCount < LOG_LINES) logCount++;
+}
+
+void webuiLogf(const char *fmt, ...)
+{
+    char tmp[LOG_WIDTH];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    webuiLog(tmp);
 }
 
 void webuiNotify(const char *msg)

@@ -213,6 +213,10 @@ float driveWish   = 0.0f;  // was verlangt wurde, Impulse/s
 float driveSpeed  = 0.0f;  // was gerade gestellt wird (angerampt)
 float driveAccel  = 2500.0f;  // Impulse/s^2 - ein Sprung wuerde ihn ausheben
 float driveInt    = 0.0f;
+bool  driveActive = false;    // faehrt oder bremst gerade noch
+// Darunter gilt er als stehend. Nicht zu klein waehlen: die Encoder rauschen,
+// und ein zu strenger Wert liesse ihn ewig im Bremszustand haengen.
+constexpr float STOP_SPEED = 120.0f;   // Impulse/s
 float turnRate    = 0.0f;  // Solldrehrate, Grad/s (0 = geradeaus)
 float yawTarget   = 0.0f;  // Sollrichtung, laeuft mit turnRate mit
 
@@ -280,10 +284,8 @@ void zeroAngle()
     integral = 0.0f;
     yawDeg   = 0.0f;   // aktuelle Blickrichtung wird die neue Sollrichtung
 
-    Serial.print(F("ZERO: Startwinkel="));
-    Serial.print(angleDeg, 2);
-    Serial.print(F(" Gyro-Bias="));
-    Serial.println(g_gyroBias, 3);
+    webuiLogf("ZERO  Winkel %.2f  Gyro X %.3f  Z %.3f",
+              angleDeg, g_gyroBias, g_gyroBiasZ);
 }
 
 // --- Parameter dauerhaft ablegen -------------------------------------------
@@ -376,7 +378,7 @@ void handleCommand(const String &cmdIn)
         requested = false; running = false; swingActive = false; swingTries = 0;
         driveWish = driveSpeed = driveInt = 0.0f;
         turnRate = yawTarget = 0.0f;
-        motor::stop(); Serial.println(F("STOP"));
+        motor::stop(); webuiLog("STOP");
     }
     else if (cmd == "ZERO") { zeroAngle(); fallFlag = false; }
     else if (cmd == "STATUS") { printStatus(); }
@@ -390,9 +392,21 @@ void handleCommand(const String &cmdIn)
     else if (cmd.startsWith("YP=")) { Ykp = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("YD=")) { Ykd = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("YSIGN=")) { yawSign = cmd.substring(6).toFloat() >= 0 ? 1.0f : -1.0f; }
-    else if (cmd.startsWith("FWD="))  { driveWish = constrain(cmd.substring(4).toFloat(), -6000.0f, 6000.0f); }
-    else if (cmd.startsWith("TURN=")) { turnRate  = constrain(cmd.substring(5).toFloat(), -180.0f, 180.0f); }
-    else if (cmd == "HALT") { driveWish = 0.0f; turnRate = 0.0f; }
+    else if (cmd.startsWith("FWD="))
+    {
+        driveWish = constrain(cmd.substring(4).toFloat(), -6000.0f, 6000.0f);
+        webuiLogf("Fahrt: Soll %.0f Impulse/s (ist %.0f)", driveWish, wheelSpeed);
+    }
+    else if (cmd.startsWith("TURN="))
+    {
+        turnRate = constrain(cmd.substring(5).toFloat(), -180.0f, 180.0f);
+        webuiLogf("Drehrate %.0f Grad/s (Richtung %.1f)", turnRate, yawDeg);
+    }
+    else if (cmd == "HALT")
+    {
+        driveWish = 0.0f; turnRate = 0.0f;
+        webuiLogf("HALT - bremst aus %.0f Impulse/s", wheelSpeed);
+    }
     else if (cmd.startsWith("DP=")) { Dkp = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("DI=")) { Dki = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("UPPWM=")) { upPwm = constrain(cmd.substring(6).toFloat(), 0.0f, 255.0f); }
@@ -431,7 +445,12 @@ void pollSerial()
         char c = Serial.read();
         if (c == '\n' || c == '\r')
         {
-            if (buf.length() > 0) { handleCommand(buf); buf = ""; }
+            if (buf.length() > 0)
+            {
+                webuiLogf("< %s (seriell)", buf.c_str());
+                handleCommand(buf);
+                buf = "";
+            }
         }
         else
         {
@@ -453,8 +472,12 @@ void pollButton()
         lastState = pressed;
         if (pressed)
         {
-            if (running || requested) { requested = false; running = false; motor::stop(); }
-            else { requested = true; fallFlag = false; }
+            if (running || requested)
+            {
+                webuiLog("Taster: aus");
+                requested = false; running = false; motor::stop();
+            }
+            else { webuiLog("Taster: START"); requested = true; fallFlag = false; }
         }
     }
 }
@@ -522,7 +545,26 @@ void loop()
     const float dv = driveAccel * dt;
     driveSpeed += constrain(driveWish - driveSpeed, -dv, dv);
 
-    const bool driving = running && (fabsf(driveWish) > 1.0f || fabsf(driveSpeed) > 1.0f);
+    // Bremsen ist ein eigener Zustand, kein Nebeneffekt. Waere die Bedingung
+    // nur "es liegt eine Sollgeschwindigkeit an", fiele die Fahrtregelung in
+    // dem Moment aus, in dem der Sollwert null erreicht - der Roboter rollt
+    // dann aber noch mit vollem Tempo weiter und wuerde einfach austrudeln.
+    // Ein Balancierer bremst, indem er sich GEGEN die Fahrtrichtung lehnt,
+    // und dafuer muss der Geschwindigkeitsregler bis zum Stillstand laufen.
+    if (running && (fabsf(driveWish) > 1.0f || fabsf(driveSpeed) > 1.0f))
+        driveActive = true;
+    else if (driveActive && fabsf(wheelSpeed) < STOP_SPEED)
+    {
+        // Wirklich zum Stehen gekommen: ab hier uebernimmt der Positionsregler
+        // und haelt die neue Stelle, statt zum Startpunkt zurueckzufahren.
+        driveActive = false;
+        driveInt = 0.0f;
+        posTarget = encoderPos();
+        webuiLog("Fahrt beendet, steht");
+    }
+    if (!running) driveActive = false;
+
+    const bool driving = running && driveActive;
 
     if (driving)
     {
@@ -582,7 +624,8 @@ void loop()
     // sofort wieder abbrechen.
     if (running && fabsf(tiltFromTrim) > FALL_ANGLE_DEG)
     {
-        Serial.println(F("Umgefallen - Motoren aus."));
+        webuiLogf("STURZ bei %.1f Grad, Drehrate %.0f/s - Motoren aus",
+                  tiltFromTrim, gyroRateDs);
         fallFlag = true;
         running = false;
         requested = false;
@@ -612,7 +655,8 @@ void loop()
         posTarget = 0;
         tiltBias  = 0.0f;
         motor::enable(true);
-        Serial.println(F("START"));
+        webuiLogf("Regler uebernimmt bei %.1f Grad, Drehrate %.0f/s",
+                  tiltFromTrim, gyroRateDs);
     }
     else if (requested && !running)
     {
@@ -627,7 +671,7 @@ void loop()
                 {
                     requested = false;
                     swingTries = 0;
-                    Serial.println(F("Aufschwingen misslungen - bitte aufstellen."));
+                    webuiLogf("Aufschwingen misslungen bei %.1f Grad", tiltFromTrim);
                     webuiNotify("Aufschwingen misslungen");
                 }
                 else
@@ -636,7 +680,8 @@ void loop()
                     swingTries++;
                     swingStartMs = now;
                     motor::enable(true);
-                    Serial.print(F("Aufschwingen, Versuch ")); Serial.println(swingTries);
+                    webuiLogf("Aufschwingen %d/%d aus %.1f Grad, PWM %.0f",
+                              swingTries, SWINGUP_MAX_TRIES, tiltFromTrim, upPwm);
                 }
             }
             else if (swingActive && now - swingStartMs >= SWINGUP_TIMEOUT_MS)
@@ -647,6 +692,7 @@ void loop()
                 motor::stop();
                 lastPwmOut = 0;
                 swingPauseUntilMs = now + SWINGUP_PAUSE_MS;
+                webuiLogf("Anlauf zu kurz, noch %.1f Grad - Pause", tiltFromTrim);
             }
         }
         else if (swingActive)
