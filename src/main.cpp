@@ -211,6 +211,9 @@ int  lastPwmOut = 0;      // zuletzt ausgegebener PWM-Wert, fuer LEDs/Web-UI
 
 uint32_t lastLoopUs = 0;
 uint32_t lastTelemetryPushMs = 0;
+// 10 Hz reichen fuers Auge. Die automatische Abstimmung stellt sich per RATE=
+// schneller, weil sie aus dem Verlauf auch das Zittern der Stellgroesse misst.
+uint32_t telemetryPeriodMs = 100;
 
 // ---------------------------------------------------------------------------
 // Hilfsfunktionen
@@ -345,6 +348,9 @@ void handleCommand(const String &cmdIn)
     else if (cmd.startsWith("VP=")) { Vkp = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("VI=")) { Vki = cmd.substring(3).toFloat(); }
     else if (cmd == "HOME") { encoderReset(); posTarget = 0; Serial.println(F("Ausgangslage neu gesetzt")); }
+    else if (cmd.startsWith("RATE=")) {
+        telemetryPeriodMs = constrain(cmd.substring(5).toInt(), 10, 1000);
+    }
     else if (cmd == "SAVE") { saveParams(); }
     else if (cmd == "LOAD") { loadParams(); printStatus(); }
     else if (cmd == "?") {
@@ -548,7 +554,7 @@ void loop()
     ledsUpdate();
 
     uint32_t nowMs = millis();
-    if (nowMs - lastTelemetryPushMs >= 100)   // 10 Hz an die Web-UI
+    if (nowMs - lastTelemetryPushMs >= telemetryPeriodMs)
     {
         lastTelemetryPushMs = nowMs;
         webuiSendTelemetry();
