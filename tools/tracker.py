@@ -41,11 +41,13 @@ F = {  # Feldnamen der Telemetrie, siehe webuiSendTelemetry()
     "tune": 23, "stage": 24, "trial": 25, "cost": 26, "phase": 27,
     "swing": 28, "UPPWM": 29, "UPMAX": 30,
     "dist": 31, "dsoll": 32, "turn": 33, "DP": 34, "DI": 35,
+    "shove": 36, "SHOVE": 37, "RP": 38, "RI": 39, "RMAX": 40,
 }
 
 # Diese Werte sind Einstellungen: aendert sich einer, wurde er verstellt.
 PARAMS = ["Kp", "Ki", "Kd", "minPwm", "trim", "sign",
-          "YP", "YD", "ysign", "VP", "VI", "DP", "DI", "UPPWM", "UPMAX"]
+          "YP", "YD", "ysign", "VP", "VI", "DP", "DI", "UPPWM", "UPMAX",
+          "SHOVE", "RP", "RI", "RMAX"]
 
 STAT_EVERY = 5.0
 
@@ -76,12 +78,13 @@ class Tracker:
             return
 
         # Zustand
-        keys = ("run", "req", "fall", "swing", "tune", "stage", "phase")
+        keys = ("run", "req", "fall", "swing", "tune", "stage", "phase", "shove")
         if any(cur[k] != self.prev[k] for k in keys):
             self.w("STATE",
                    f"laeuft={cur['run']} angefordert={cur['req']} "
                    f"gestuerzt={cur['fall']} schwingt={cur['swing']} "
                    f"abstimmung={cur['tune']}({cur['phase']}) "
+                   f"stoss={cur['shove']} "
                    f"| Winkel {f('angle'):+.2f} Rate {f('rate'):+.0f}")
 
         # Fahrt

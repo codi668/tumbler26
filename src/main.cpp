@@ -220,6 +220,25 @@ constexpr float STOP_SPEED = 120.0f;   // Impulse/s
 float turnRate    = 0.0f;  // Solldrehrate, Grad/s (0 = geradeaus)
 float yawTarget   = 0.0f;  // Sollrichtung, laeuft mit turnRate mit
 
+// Reaktion auf einen Stoss. Schubst ihn jemand an, passieren zwei Dinge
+// nacheinander, und sie duerfen sich nicht in die Quere kommen:
+//   1. Er muss den Sturz abfangen. Dabei braucht der Winkelregler die volle
+//      Stellgroesse - jeder Aussenregler, der jetzt am Sollwinkel zieht,
+//      arbeitet gegen die Rettung.
+//   2. Erst wenn er wieder ruhig steht, holt er sich seine Ausgangsstelle
+//      zurueck, und dafuer darf er sich deutlich weiter lehnen als im
+//      normalen Positionshalten.
+// Deshalb ist das Zurueckfahren ein eigener Zustand mit eigenen Verstaerkungen
+// und eigener Neigungsgrenze, der erst nach dem Abfangen einsetzt.
+float shoveRate = 60.0f;       // ab dieser Drehrate gilt es als Stoss, Grad/s
+float Rkp = 0.0030f;           // Daempfung beim Zurueckfahren, je Impuls/s
+float Rki = 0.0015f;           // Rueckstellkraft, je Impuls Wegfehler
+float returnBiasMax = 8.0f;    // so weit darf er sich dabei lehnen, Grad
+bool  shoveActive = false;
+uint32_t shoveSinceMs = 0, calmSinceMs = 0, runStartMs = 0;
+constexpr float HOME_TOL = 150.0f;        // Impulse, dann gilt er als angekommen
+constexpr uint32_t RETURN_TIMEOUT_MS = 8000;
+
 float tiltBias   = 0.0f;   // aktueller Versatz des Sollwinkels, Grad
 long  posTarget  = 0;      // Sollposition in Encoder-Impulsen
 float wheelSpeed = 0.0f;   // gefiltertes Tempo, Impulse/s
@@ -311,6 +330,10 @@ void saveParams()
     prefs.putFloat("upmax", upMax);
     prefs.putFloat("dkp", Dkp);
     prefs.putFloat("dki", Dki);
+    prefs.putFloat("shove", shoveRate);
+    prefs.putFloat("rkp", Rkp);
+    prefs.putFloat("rki", Rki);
+    prefs.putFloat("rmax", returnBiasMax);
     prefs.end();
     Serial.println(F("gespeichert"));
     webuiNotify("gespeichert");
@@ -334,6 +357,10 @@ void loadParams()
     upMax   = prefs.getFloat("upmax", upMax);
     Dkp     = prefs.getFloat("dkp", Dkp);
     Dki     = prefs.getFloat("dki", Dki);
+    shoveRate     = prefs.getFloat("shove", shoveRate);
+    Rkp           = prefs.getFloat("rkp", Rkp);
+    Rki           = prefs.getFloat("rki", Rki);
+    returnBiasMax = prefs.getFloat("rmax", returnBiasMax);
     prefs.end();
 }
 
@@ -364,6 +391,11 @@ void printStatus()
     Serial.print(F(" turn=")); Serial.print(turnRate, 0);
     Serial.print(F(" DP=")); Serial.print(Dkp, 4);
     Serial.print(F(" DI=")); Serial.println(Dki, 4);
+    Serial.print(F("stoss=")); Serial.print(shoveActive);
+    Serial.print(F(" SHOVE=")); Serial.print(shoveRate, 0);
+    Serial.print(F(" RP=")); Serial.print(Rkp, 4);
+    Serial.print(F(" RI=")); Serial.print(Rki, 4);
+    Serial.print(F(" RMAX=")); Serial.println(returnBiasMax, 1);
 }
 
 void handleCommand(const String &cmdIn)
@@ -407,6 +439,10 @@ void handleCommand(const String &cmdIn)
         driveWish = 0.0f; turnRate = 0.0f;
         webuiLogf("HALT - bremst aus %.0f Impulse/s", wheelSpeed);
     }
+    else if (cmd.startsWith("SHOVE=")) { shoveRate = constrain(cmd.substring(6).toFloat(), 20.0f, 300.0f); }
+    else if (cmd.startsWith("RP=")) { Rkp = cmd.substring(3).toFloat(); }
+    else if (cmd.startsWith("RI=")) { Rki = cmd.substring(3).toFloat(); }
+    else if (cmd.startsWith("RMAX=")) { returnBiasMax = constrain(cmd.substring(5).toFloat(), 0.0f, 15.0f); }
     else if (cmd.startsWith("DP=")) { Dkp = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("DI=")) { Dki = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("UPPWM=")) { upPwm = constrain(cmd.substring(6).toFloat(), 0.0f, 255.0f); }
@@ -429,6 +465,7 @@ void handleCommand(const String &cmdIn)
         Serial.println(F("Positionsregler: VP= VI= HOME  (VP=0 VI=0 schaltet ihn ab)"));
         Serial.println(F("Aufschwingen: UPPWM= UPMAX=  (UPPWM=0 schaltet es ab)"));
         Serial.println(F("Fahren: FWD=<Impulse/s> TURN=<Grad/s> HALT  DP= DI="));
+        Serial.println(F("Auf Stoss reagieren: SHOVE= RP= RI= RMAX=  (RI=0 schaltet ab)"));
         Serial.println(F("SAVE LOAD - Parameter im Flash ablegen/zurueckholen"));
         Serial.println(F("TUNE - Abstimmung starten/beenden, TUNEOFF - abbrechen"));
     }
@@ -592,6 +629,64 @@ void loop()
         driveInt = 0.0f;
     }
 
+    // --- Stoss erkennen und die Ausgangsstelle zurueckholen ---------------
+    // Nicht waehrend einer gewollten Fahrt (da sind Drehraten normal und die
+    // Sollposition wandert ohnehin mit) und nicht in der ersten halben Sekunde
+    // nach dem Start - beim Aufschwingen kommt er mit viel Schwung an.
+    if (running && !driving && !swingActive && millis() - runStartMs > 500)
+    {
+        const uint32_t now = millis();
+        if (!shoveActive && fabsf(gyroRateDs) > shoveRate)
+        {
+            shoveActive  = true;
+            shoveSinceMs = now;
+            calmSinceMs  = 0;
+            webuiLogf("STOSS bei %.0f Grad/s, Winkel %.1f - erst fangen",
+                      gyroRateDs, angleDeg - trim);
+        }
+
+        if (shoveActive)
+        {
+            const float posErr = (float)(encoderPos() - posTarget);
+
+            // "Beruhigt" heisst: die Drehrate ist wieder klein, und zwar eine
+            // Weile lang - ein einzelner ruhiger Messwert im Nulldurchgang
+            // waehrend des Pendelns zaehlt nicht.
+            if (fabsf(gyroRateDs) < 40.0f)
+            {
+                if (calmSinceMs == 0) calmSinceMs = now;
+            }
+            else calmSinceMs = 0;
+
+            const bool caught = calmSinceMs != 0 && now - calmSinceMs > 250;
+
+            if (caught)
+            {
+                // Abgefangen: jetzt kraeftig zurueck. Eigene Verstaerkungen und
+                // eine weitere Neigungsgrenze als beim normalen Positionshalten,
+                // damit er die Strecke auch wirklich schafft.
+                const float bias = -(Rki * posErr + Rkp * wheelSpeed);
+                tiltBias = constrain(bias, -returnBiasMax, returnBiasMax);
+
+                if (fabsf(posErr) < HOME_TOL && fabsf(wheelSpeed) < STOP_SPEED)
+                {
+                    shoveActive = false;
+                    webuiLogf("wieder an der Ausgangsstelle (%.0f Impulse Rest)", posErr);
+                }
+            }
+            // Solange er noch nicht abgefangen ist, bleibt tiltBias so, wie ihn
+            // die normale Regelung oben gesetzt hat - der Winkelregler hat Vorrang.
+
+            if (now - shoveSinceMs > RETURN_TIMEOUT_MS)
+            {
+                shoveActive = false;
+                posTarget = encoderPos();   // Stelle aufgeben, hier neu verankern
+                webuiLogf("Rueckkehr aufgegeben, %.0f Impulse entfernt", posErr);
+            }
+        }
+    }
+    else if (shoveActive) shoveActive = false;
+
     float angleErr = angleDeg - trim - tiltBias;
 
     // Blickrichtung mitfuehren. Fuer die Hochachse gibt es keinen zweiten
@@ -649,6 +744,8 @@ void loop()
         swingTries  = 0;
         driveWish = driveSpeed = driveInt = 0.0f;   // nie fahrend losstarten
         turnRate  = yawTarget  = 0.0f;
+        runStartMs  = millis();
+        shoveActive = false;
         integral = 0.0f;
         yawDeg   = 0.0f;   // Richtung im Moment des Starts ist die Sollrichtung
         encoderReset();    // und der Standort im Moment des Starts die Sollposition

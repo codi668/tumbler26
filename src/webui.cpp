@@ -159,6 +159,13 @@ input[type=range]{width:100%;accent-color:var(--acc);margin:0}
 </div>
 
 <div class="card"><h2>Fahrregler</h2><div id="g5"></div></div>
+<div class="card"><h2>Auf Sto&szlig; reagieren</h2><div id="g6"></div>
+  <div class="sub">Schubst ihn jemand, faengt er sich erst &mdash; und holt sich
+    dann seine Ausgangsstelle zur&uuml;ck. SHOVE ist die Drehrate, ab der er
+    einen Sto&szlig; annimmt, RI die R&uuml;ckstellkraft, RP die D&auml;mpfung,
+    RMAX die Neigung, die er sich daf&uuml;r erlaubt. RI&nbsp;=&nbsp;0 schaltet
+    es ab.</div>
+</div>
 
 <div class="card"><h2>Was er tut</h2>
   <div id="log" style="font-family:ui-monospace,monospace;font-size:.72em;
@@ -176,7 +183,9 @@ const P = [
   ['Ykp','YP',0,15,0.1,1,'g2'], ['Ykd','YD',0,2,0.01,2,'g2'],
   ['Vkp','VP',0,0.01,0.0002,4,'g3'], ['Vki','VI',0,0.004,0.0001,4,'g3'],
   ['upPwm','UPPWM',0,255,5,0,'g4'], ['upMax','UPMAX',0,80,1,0,'g4'],
-  ['Dkp','DP',0,0.01,0.0002,4,'g5'], ['Dki','DI',0,0.004,0.0001,4,'g5']
+  ['Dkp','DP',0,0.01,0.0002,4,'g5'], ['Dki','DI',0,0.004,0.0001,4,'g5'],
+  ['shoveRate','SHOVE',20,300,5,0,'g6'], ['Rki','RI',0,0.006,0.0001,4,'g6'],
+  ['Rkp','RP',0,0.01,0.0002,4,'g6'], ['returnBiasMax','RMAX',0,15,0.5,1,'g6']
 ];
 const SIGNS = [['sign','SIGN','Motorrichtung','g1'],
                ['ysign','YSIGN','Drehrichtung','g2']];
@@ -313,7 +322,8 @@ function connect() {
           (Math.abs(dreh) > 0.5 ? ' \u00b7 Drehung ' + dreh + '\u00b0/s' : ' \u00b7 geradeaus');
 
     const st = document.getElementById('state');
-    if (p[28] === '1') { st.textContent = 'AUFSTEHEN';  st.className = 'wait'; }
+    if (p[36] === '1') { st.textContent = 'ZUR\u00dcCK';   st.className = 'wait'; }
+    else if (p[28] === '1') { st.textContent = 'AUFSTEHEN';  st.className = 'wait'; }
     else if (fall && !run)  { st.textContent = 'UMGEFALLEN'; st.className = 'fall'; }
     else if (run)      { st.textContent = 'BALANCIERT'; st.className = 'run'; }
     else if (req)      { st.textContent = 'WARTET';     st.className = 'wait'; }
@@ -326,7 +336,8 @@ function connect() {
     // Regler nur nachfuehren, solange niemand gerade daran zieht.
     const vals = {Kp:p[7],Ki:p[8],Kd:p[9],minPwm:p[10],trim:p[11],
                   Ykp:p[15],Ykd:p[16],Vkp:p[21],Vki:p[22],
-                  upPwm:p[29],upMax:p[30],Dkp:p[34],Dki:p[35]};
+                  upPwm:p[29],upMax:p[30],Dkp:p[34],Dki:p[35],
+                  shoveRate:p[37],Rkp:p[38],Rki:p[39],returnBiasMax:p[40]};
     for (const [id,,,,,dec] of P) {
       const el = document.getElementById(id);
       if (el !== document.activeElement) {
@@ -478,10 +489,10 @@ void webuiSendTelemetry()
 {
     if (ws.count() == 0) return;
 
-    char buf[460];
+    char buf[540];
     snprintf(buf, sizeof(buf),
              "T,%.2f,%.2f,%d,%d,%d,%d,%.2f,%.3f,%.2f,%.1f,%.2f,%.0f,%.2f,%d,%.2f,%.2f,%.0f"
-             ",%ld,%.0f,%.2f,%.4f,%.4f,%d,%d,%d,%.2f,%s,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%.4f,%.4f",
+             ",%ld,%.0f,%.2f,%.4f,%.4f,%d,%d,%d,%.2f,%s,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%.4f,%.4f,%d,%.0f,%.4f,%.4f,%.1f",
              angleDeg, gyroRateDs, lastPwmOut,
              running ? 1 : 0, requested ? 1 : 0, fallFlag ? 1 : 0,
              Kp, Ki, Kd, minPwm, trim, outSign,
@@ -490,6 +501,7 @@ void webuiSendTelemetry()
              autotuneActive() ? 1 : 0, autotuneStage(), autotuneTrial(),
              autotuneBestCost(), autotunePhase(),
              swingActive ? 1 : 0, upPwm, upMax,
-             driveSpeed, driveWish, turnRate, Dkp, Dki);
+             driveSpeed, driveWish, turnRate, Dkp, Dki,
+             shoveActive ? 1 : 0, shoveRate, Rkp, Rki, returnBiasMax);
     ws.textAll(buf);
 }
