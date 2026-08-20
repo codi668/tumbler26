@@ -4,3 +4,6 @@ __pycache__/
 
 # WLAN-Zugangsdaten - bleiben lokal, Vorlage siehe secrets.h.example
 include/secrets.h
+
+# Mitschnitt des Trackers
+logs/
