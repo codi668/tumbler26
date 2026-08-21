@@ -230,20 +230,32 @@ float yawTarget   = 0.0f;  // Sollrichtung, laeuft mit turnRate mit
 //      normalen Positionshalten.
 // Deshalb ist das Zurueckfahren ein eigener Zustand mit eigenen Verstaerkungen
 // und eigener Neigungsgrenze, der erst nach dem Abfangen einsetzt.
-float shoveRate = 60.0f;       // ab dieser Drehrate gilt es als Stoss, Grad/s
-float returnK   = 0.9f;        // Rueckholtempo je Impuls Abstand (1/s)
-float returnVmax = 1200.0f;    // hoechstens so schnell zurueck, Impulse/s
+float shoveRate = 85.0f;       // ab dieser Drehrate gilt es als Stoss, Grad/s
+float returnK   = 0.6f;        // Rueckholtempo je Impuls Abstand (1/s)
+float returnVmax = 700.0f;     // hoechstens so schnell zurueck, Impulse/s
 float returnBiasMax = 6.0f;    // so weit darf er sich dabei lehnen, Grad
 bool  shoveActive = false;
 bool  shoveCaught = false;     // abgefangen, faehrt jetzt zurueck
-uint32_t shoveSinceMs = 0, calmSinceMs = 0, runStartMs = 0;
+// Die Erkennung wird erst scharf, wenn der Roboter nach dem Start einmal
+// wirklich ruhig stand. Eine feste Wartezeit reicht nicht: vom Aufschwingen
+// kommt er mit 150 bis 220 Grad/s an, und diesen Schwung hat er sich dann
+// selbst als Stoss angerechnet - samt Rettungsfahrt vor einer Stoerung, die
+// es nie gab.
+bool  shoveArmed = false;
+uint32_t settledSinceMs = 0;
+uint32_t shoveSinceMs = 0, calmSinceMs = 0;
 
 // Der Sollwinkel darf nie springen. Ein Sprung ist fuer den Winkelregler ein
 // Stoss wie jeder andere - er reisst die Raeder los, das erzeugt Drehrate,
 // und wenn davon wieder die Umschaltung abhaengt, schaukelt sich das zu einem
 // Dauerpendeln auf. Deshalb faehrt tiltBias der Vorgabe nur begrenzt schnell nach.
 constexpr float BIAS_SLEW_DEG_S = 10.0f;
-constexpr float HOME_TOL = 150.0f;        // Impulse, dann gilt er als angekommen
+// Wann gilt er als angekommen? Nicht zu streng: er wandert im ruhigen Stand
+// von allein um +-250 Impulse (aus dem Mitschnitt: 127, -146, 193, -252, 158).
+// Eine Schwelle unterhalb dieser Eigenbewegung kann er gar nicht erreichen -
+// mit 150 meldete er darum "Rueckkehr aufgegeben", obwohl er mit 175 Impulsen
+// laengst da war.
+constexpr float HOME_TOL = 300.0f;        // Impulse, dann gilt er als angekommen
 constexpr uint32_t RETURN_TIMEOUT_MS = 8000;
 
 float tiltBias   = 0.0f;   // aktueller Versatz des Sollwinkels, Grad
@@ -642,10 +654,27 @@ void loop()
     // Nicht waehrend einer gewollten Fahrt (da sind Drehraten normal und die
     // Sollposition wandert ohnehin mit) und nicht in der ersten halben Sekunde
     // nach dem Start - beim Aufschwingen kommt er mit viel Schwung an.
-    if (running && !driving && !swingActive && millis() - runStartMs > 500)
+    if (running && !driving && !swingActive)
     {
         const uint32_t now = millis();
-        if (!shoveActive && fabsf(gyroRateDs) > shoveRate)
+
+        // Scharfschalten: einmal 400 ms lang ruhig gestanden.
+        if (!shoveArmed)
+        {
+            if (fabsf(gyroRateDs) < 25.0f && fabsf(angleDeg - trim) < 3.0f)
+            {
+                if (settledSinceMs == 0) settledSinceMs = now;
+                if (now - settledSinceMs > 400)
+                {
+                    shoveArmed = true;
+                    posTarget = encoderPos();   // hier steht er, das ist die Stelle
+                    webuiLog("steht ruhig - Stosserkennung scharf");
+                }
+            }
+            else settledSinceMs = 0;
+        }
+
+        if (shoveArmed && !shoveActive && fabsf(gyroRateDs) > shoveRate)
         {
             shoveActive  = true;
             shoveCaught  = false;
@@ -710,6 +739,7 @@ void loop()
         }
     }
     else if (shoveActive) { shoveActive = false; shoveCaught = false; }
+    if (!running) { shoveArmed = false; settledSinceMs = 0; }
 
     // Vorgabe begrenzt nachfahren - siehe BIAS_SLEW_DEG_S.
     {
@@ -774,8 +804,9 @@ void loop()
         swingTries  = 0;
         driveWish = driveSpeed = driveInt = 0.0f;   // nie fahrend losstarten
         turnRate  = yawTarget  = 0.0f;
-        runStartMs  = millis();
         shoveActive = false;
+        shoveArmed  = false;
+        settledSinceMs = 0;
         integral = 0.0f;
         yawDeg   = 0.0f;   // Richtung im Moment des Starts ist die Sollrichtung
         encoderReset();    // und der Standort im Moment des Starts die Sollposition
