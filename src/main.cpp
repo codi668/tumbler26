@@ -231,11 +231,18 @@ float yawTarget   = 0.0f;  // Sollrichtung, laeuft mit turnRate mit
 // Deshalb ist das Zurueckfahren ein eigener Zustand mit eigenen Verstaerkungen
 // und eigener Neigungsgrenze, der erst nach dem Abfangen einsetzt.
 float shoveRate = 60.0f;       // ab dieser Drehrate gilt es als Stoss, Grad/s
-float Rkp = 0.0030f;           // Daempfung beim Zurueckfahren, je Impuls/s
-float Rki = 0.0015f;           // Rueckstellkraft, je Impuls Wegfehler
-float returnBiasMax = 8.0f;    // so weit darf er sich dabei lehnen, Grad
+float returnK   = 0.9f;        // Rueckholtempo je Impuls Abstand (1/s)
+float returnVmax = 1200.0f;    // hoechstens so schnell zurueck, Impulse/s
+float returnBiasMax = 6.0f;    // so weit darf er sich dabei lehnen, Grad
 bool  shoveActive = false;
+bool  shoveCaught = false;     // abgefangen, faehrt jetzt zurueck
 uint32_t shoveSinceMs = 0, calmSinceMs = 0, runStartMs = 0;
+
+// Der Sollwinkel darf nie springen. Ein Sprung ist fuer den Winkelregler ein
+// Stoss wie jeder andere - er reisst die Raeder los, das erzeugt Drehrate,
+// und wenn davon wieder die Umschaltung abhaengt, schaukelt sich das zu einem
+// Dauerpendeln auf. Deshalb faehrt tiltBias der Vorgabe nur begrenzt schnell nach.
+constexpr float BIAS_SLEW_DEG_S = 10.0f;
 constexpr float HOME_TOL = 150.0f;        // Impulse, dann gilt er als angekommen
 constexpr uint32_t RETURN_TIMEOUT_MS = 8000;
 
@@ -331,8 +338,8 @@ void saveParams()
     prefs.putFloat("dkp", Dkp);
     prefs.putFloat("dki", Dki);
     prefs.putFloat("shove", shoveRate);
-    prefs.putFloat("rkp", Rkp);
-    prefs.putFloat("rki", Rki);
+    prefs.putFloat("rk", returnK);
+    prefs.putFloat("rv", returnVmax);
     prefs.putFloat("rmax", returnBiasMax);
     prefs.end();
     Serial.println(F("gespeichert"));
@@ -358,8 +365,8 @@ void loadParams()
     Dkp     = prefs.getFloat("dkp", Dkp);
     Dki     = prefs.getFloat("dki", Dki);
     shoveRate     = prefs.getFloat("shove", shoveRate);
-    Rkp           = prefs.getFloat("rkp", Rkp);
-    Rki           = prefs.getFloat("rki", Rki);
+    returnK       = prefs.getFloat("rk", returnK);
+    returnVmax    = prefs.getFloat("rv", returnVmax);
     returnBiasMax = prefs.getFloat("rmax", returnBiasMax);
     prefs.end();
 }
@@ -393,8 +400,8 @@ void printStatus()
     Serial.print(F(" DI=")); Serial.println(Dki, 4);
     Serial.print(F("stoss=")); Serial.print(shoveActive);
     Serial.print(F(" SHOVE=")); Serial.print(shoveRate, 0);
-    Serial.print(F(" RP=")); Serial.print(Rkp, 4);
-    Serial.print(F(" RI=")); Serial.print(Rki, 4);
+    Serial.print(F(" RK=")); Serial.print(returnK, 2);
+    Serial.print(F(" RV=")); Serial.print(returnVmax, 0);
     Serial.print(F(" RMAX=")); Serial.println(returnBiasMax, 1);
 }
 
@@ -440,8 +447,8 @@ void handleCommand(const String &cmdIn)
         webuiLogf("HALT - bremst aus %.0f Impulse/s", wheelSpeed);
     }
     else if (cmd.startsWith("SHOVE=")) { shoveRate = constrain(cmd.substring(6).toFloat(), 20.0f, 300.0f); }
-    else if (cmd.startsWith("RP=")) { Rkp = cmd.substring(3).toFloat(); }
-    else if (cmd.startsWith("RI=")) { Rki = cmd.substring(3).toFloat(); }
+    else if (cmd.startsWith("RK=")) { returnK = constrain(cmd.substring(3).toFloat(), 0.0f, 4.0f); }
+    else if (cmd.startsWith("RV=")) { returnVmax = constrain(cmd.substring(3).toFloat(), 0.0f, 4000.0f); }
     else if (cmd.startsWith("RMAX=")) { returnBiasMax = constrain(cmd.substring(5).toFloat(), 0.0f, 15.0f); }
     else if (cmd.startsWith("DP=")) { Dkp = cmd.substring(3).toFloat(); }
     else if (cmd.startsWith("DI=")) { Dki = cmd.substring(3).toFloat(); }
@@ -465,7 +472,7 @@ void handleCommand(const String &cmdIn)
         Serial.println(F("Positionsregler: VP= VI= HOME  (VP=0 VI=0 schaltet ihn ab)"));
         Serial.println(F("Aufschwingen: UPPWM= UPMAX=  (UPPWM=0 schaltet es ab)"));
         Serial.println(F("Fahren: FWD=<Impulse/s> TURN=<Grad/s> HALT  DP= DI="));
-        Serial.println(F("Auf Stoss reagieren: SHOVE= RP= RI= RMAX=  (RI=0 schaltet ab)"));
+        Serial.println(F("Auf Stoss reagieren: SHOVE= RK= RV= RMAX=  (RK=0 schaltet ab)"));
         Serial.println(F("SAVE LOAD - Parameter im Flash ablegen/zurueckholen"));
         Serial.println(F("TUNE - Abstimmung starten/beenden, TUNEOFF - abbrechen"));
     }
@@ -603,6 +610,8 @@ void loop()
 
     const bool driving = running && driveActive;
 
+    float biasWanted = 0.0f;   // Vorgabe; tiltBias faehrt ihr unten nach
+
     if (driving)
     {
         // Fahrbetrieb: auf Geschwindigkeit regeln. Schneller werden heisst
@@ -610,8 +619,8 @@ void loop()
         // Vorzeichen in den Sollwinkel.
         const float speedErr = driveSpeed - wheelSpeed;
         driveInt = constrain(driveInt + speedErr * dt, -4000.0f, 4000.0f);
-        tiltBias = constrain(Dkp * speedErr + Dki * driveInt,
-                             -TILT_BIAS_MAX, TILT_BIAS_MAX);
+        biasWanted = constrain(Dkp * speedErr + Dki * driveInt,
+                               -TILT_BIAS_MAX, TILT_BIAS_MAX);
         posTarget = encoderPos();   // im Fahren zieht ihn nichts zum Start zurueck
     }
     else if (running && (Vkp != 0.0f || Vki != 0.0f))
@@ -620,12 +629,12 @@ void loop()
         // Vorzeichen: ist der Roboter zu weit VORNE (posErr positiv), muss er
         // zurueck - also nach hinten lehnen, der Sollwinkel geht ins Negative.
         float bias = -(Vki * posErr + Vkp * wheelSpeed);
-        tiltBias = constrain(bias, -TILT_BIAS_MAX, TILT_BIAS_MAX);
+        biasWanted = constrain(bias, -TILT_BIAS_MAX, TILT_BIAS_MAX);
         driveInt = 0.0f;
     }
     else
     {
-        tiltBias = 0.0f;
+        biasWanted = 0.0f;
         driveInt = 0.0f;
     }
 
@@ -639,8 +648,10 @@ void loop()
         if (!shoveActive && fabsf(gyroRateDs) > shoveRate)
         {
             shoveActive  = true;
+            shoveCaught  = false;
             shoveSinceMs = now;
             calmSinceMs  = 0;
+            driveInt     = 0.0f;
             webuiLogf("STOSS bei %.0f Grad/s, Winkel %.1f - erst fangen",
                       gyroRateDs, angleDeg - trim);
         }
@@ -649,43 +660,62 @@ void loop()
         {
             const float posErr = (float)(encoderPos() - posTarget);
 
-            // "Beruhigt" heisst: die Drehrate ist wieder klein, und zwar eine
-            // Weile lang - ein einzelner ruhiger Messwert im Nulldurchgang
-            // waehrend des Pendelns zaehlt nicht.
-            if (fabsf(gyroRateDs) < 40.0f)
+            if (!shoveCaught)
             {
-                if (calmSinceMs == 0) calmSinceMs = now;
+                // Abfangen hat Vorrang: der Winkelregler bekommt die volle
+                // Stellgroesse, die Vorgabe von oben bleibt unangetastet.
+                if (fabsf(gyroRateDs) < 40.0f)
+                {
+                    if (calmSinceMs == 0) calmSinceMs = now;
+                    if (now - calmSinceMs > 250) shoveCaught = true;
+                }
+                else calmSinceMs = 0;
             }
-            else calmSinceMs = 0;
 
-            const bool caught = calmSinceMs != 0 && now - calmSinceMs > 250;
-
-            if (caught)
+            if (shoveCaught)
             {
-                // Abgefangen: jetzt kraeftig zurueck. Eigene Verstaerkungen und
-                // eine weitere Neigungsgrenze als beim normalen Positionshalten,
-                // damit er die Strecke auch wirklich schafft.
-                const float bias = -(Rki * posErr + Rkp * wheelSpeed);
-                tiltBias = constrain(bias, -returnBiasMax, returnBiasMax);
+                // Einmal abgefangen, bleibt er im Rueckholen. Frueher hing das
+                // an der Drehrate - aber das Zurueckfahren ERZEUGT Drehrate,
+                // also fiel er staendig zwischen beiden Zustaenden hin und her
+                // und pendelte mit der Umschaltfrequenz.
+                //
+                // Zurueckgeholt wird ueber eine SOLLGESCHWINDIGKEIT, nicht mit
+                // einem festen Neigungsversatz: aus dem Abstand wird ein Tempo,
+                // begrenzt auf returnVmax, und dieses Tempo stellt derselbe
+                // Geschwindigkeitsregler wie beim Fahren. Damit bremst er von
+                // selbst weich ab, je naeher er kommt, statt am Ziel
+                // vorbeizuschiessen und wieder umkehren zu muessen.
+                const float wish = constrain(-returnK * posErr,
+                                             -returnVmax, returnVmax);
+                const float speedErr = wish - wheelSpeed;
+                driveInt = constrain(driveInt + speedErr * dt, -4000.0f, 4000.0f);
+                biasWanted = constrain(Dkp * speedErr + Dki * driveInt,
+                                       -returnBiasMax, returnBiasMax);
 
                 if (fabsf(posErr) < HOME_TOL && fabsf(wheelSpeed) < STOP_SPEED)
                 {
                     shoveActive = false;
+                    driveInt = 0.0f;
                     webuiLogf("wieder an der Ausgangsstelle (%.0f Impulse Rest)", posErr);
                 }
             }
-            // Solange er noch nicht abgefangen ist, bleibt tiltBias so, wie ihn
-            // die normale Regelung oben gesetzt hat - der Winkelregler hat Vorrang.
 
             if (now - shoveSinceMs > RETURN_TIMEOUT_MS)
             {
                 shoveActive = false;
+                driveInt = 0.0f;
                 posTarget = encoderPos();   // Stelle aufgeben, hier neu verankern
                 webuiLogf("Rueckkehr aufgegeben, %.0f Impulse entfernt", posErr);
             }
         }
     }
-    else if (shoveActive) shoveActive = false;
+    else if (shoveActive) { shoveActive = false; shoveCaught = false; }
+
+    // Vorgabe begrenzt nachfahren - siehe BIAS_SLEW_DEG_S.
+    {
+        const float maxStep = BIAS_SLEW_DEG_S * dt;
+        tiltBias += constrain(biasWanted - tiltBias, -maxStep, maxStep);
+    }
 
     float angleErr = angleDeg - trim - tiltBias;
 
