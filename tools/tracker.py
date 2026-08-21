@@ -41,13 +41,13 @@ F = {  # Feldnamen der Telemetrie, siehe webuiSendTelemetry()
     "tune": 23, "stage": 24, "trial": 25, "cost": 26, "phase": 27,
     "swing": 28, "UPPWM": 29, "UPMAX": 30,
     "dist": 31, "dsoll": 32, "turn": 33, "DP": 34, "DI": 35,
-    "shove": 36, "SHOVE": 37, "RK": 38, "RV": 39, "RMAX": 40,
+    "shove": 36, "SHOVE": 37, "RK": 38, "RV": 39, "RMAX": 40, "TENS": 41,
 }
 
 # Diese Werte sind Einstellungen: aendert sich einer, wurde er verstellt.
 PARAMS = ["Kp", "Ki", "Kd", "minPwm", "trim", "sign",
           "YP", "YD", "ysign", "VP", "VI", "DP", "DI", "UPPWM", "UPMAX",
-          "SHOVE", "RK", "RV", "RMAX"]
+          "SHOVE", "RK", "RV", "RMAX", "TENS"]
 
 STAT_EVERY = 5.0
 

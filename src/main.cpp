@@ -230,6 +230,11 @@ float yawTarget   = 0.0f;  // Sollrichtung, laeuft mit turnRate mit
 //      normalen Positionshalten.
 // Deshalb ist das Zurueckfahren ein eigener Zustand mit eigenen Verstaerkungen
 // und eigener Neigungsgrenze, der erst nach dem Abfangen einsetzt.
+// Gegengleiche Vorspannung beider Antriebe, 0..60. Ab Werk aus: sie kostet
+// dauerhaft Strom und Waerme, und ob sie hilft, haengt am Getriebespiel des
+// konkreten Aufbaus - das muss man ausprobieren und messen.
+float tension = 0.0f;
+
 float shoveRate = 85.0f;       // ab dieser Drehrate gilt es als Stoss, Grad/s
 float returnK   = 0.6f;        // Rueckholtempo je Impuls Abstand (1/s)
 float returnVmax = 700.0f;     // hoechstens so schnell zurueck, Impulse/s
@@ -350,6 +355,7 @@ void saveParams()
     prefs.putFloat("dkp", Dkp);
     prefs.putFloat("dki", Dki);
     prefs.putFloat("shove", shoveRate);
+    prefs.putFloat("tens", tension);
     prefs.putFloat("rk", returnK);
     prefs.putFloat("rv", returnVmax);
     prefs.putFloat("rmax", returnBiasMax);
@@ -377,6 +383,7 @@ void loadParams()
     Dkp     = prefs.getFloat("dkp", Dkp);
     Dki     = prefs.getFloat("dki", Dki);
     shoveRate     = prefs.getFloat("shove", shoveRate);
+    tension       = prefs.getFloat("tens", tension);
     returnK       = prefs.getFloat("rk", returnK);
     returnVmax    = prefs.getFloat("rv", returnVmax);
     returnBiasMax = prefs.getFloat("rmax", returnBiasMax);
@@ -412,6 +419,7 @@ void printStatus()
     Serial.print(F(" DI=")); Serial.println(Dki, 4);
     Serial.print(F("stoss=")); Serial.print(shoveActive);
     Serial.print(F(" SHOVE=")); Serial.print(shoveRate, 0);
+    Serial.print(F(" TENS=")); Serial.print(tension, 0);
     Serial.print(F(" RK=")); Serial.print(returnK, 2);
     Serial.print(F(" RV=")); Serial.print(returnVmax, 0);
     Serial.print(F(" RMAX=")); Serial.println(returnBiasMax, 1);
@@ -458,6 +466,11 @@ void handleCommand(const String &cmdIn)
         driveWish = 0.0f; turnRate = 0.0f;
         webuiLogf("HALT - bremst aus %.0f Impulse/s", wheelSpeed);
     }
+    else if (cmd.startsWith("TENS="))
+    {
+        tension = constrain(cmd.substring(5).toFloat(), 0.0f, 60.0f);
+        webuiLogf("Vorspannung %.0f", tension);
+    }
     else if (cmd.startsWith("SHOVE=")) { shoveRate = constrain(cmd.substring(6).toFloat(), 20.0f, 300.0f); }
     else if (cmd.startsWith("RK=")) { returnK = constrain(cmd.substring(3).toFloat(), 0.0f, 4.0f); }
     else if (cmd.startsWith("RV=")) { returnVmax = constrain(cmd.substring(3).toFloat(), 0.0f, 4000.0f); }
@@ -485,6 +498,7 @@ void handleCommand(const String &cmdIn)
         Serial.println(F("Aufschwingen: UPPWM= UPMAX=  (UPPWM=0 schaltet es ab)"));
         Serial.println(F("Fahren: FWD=<Impulse/s> TURN=<Grad/s> HALT  DP= DI="));
         Serial.println(F("Auf Stoss reagieren: SHOVE= RK= RV= RMAX=  (RK=0 schaltet ab)"));
+        Serial.println(F("TENS= - beide Antriebe gegeneinander vorspannen (0 = aus)"));
         Serial.println(F("SAVE LOAD - Parameter im Flash ablegen/zurueckholen"));
         Serial.println(F("TUNE - Abstimmung starten/beenden, TUNEOFF - abbrechen"));
     }
@@ -877,8 +891,24 @@ void loop()
                                  + Ykd * (yawRateDs - turnRate));
         lastSteer = constrain(steer, -YAW_MAX_STEER, YAW_MAX_STEER);
 
-        motor::set(constrain(lastPwmOut + (int)lastSteer, -255, 255),
-                   constrain(lastPwmOut - (int)lastSteer, -255, 255));
+        // Vorspannung: beide Antriebe gegeneinander unter Last halten. Damit
+        // ist das Getriebespiel schon herausgenommen und die Haftreibung
+        // ueberwunden, wenn die naechste Korrektur kommt - sie wirkt sofort,
+        // statt erst den Losbrechmoment aufbringen zu muessen.
+        //
+        // Balancieren kann diese Groesse NICHT: zwei entgegengesetzte
+        // Radkraefte heben sich am Boden auf, uebrig bleibt nur ein Moment um
+        // die Hochachse. Sie liegt deshalb zusaetzlich zum Reglerausgang an,
+        // nicht an seiner Stelle.
+        //
+        // Sie muss klein genug bleiben, dass die Raeder nicht durchrutschen.
+        // Sobald er sich naemlich wirklich zu drehen beginnt, sieht das der
+        // Gierregler als Richtungsfehler und haelt mit genau derselben
+        // gegengleichen Groesse dagegen - dann hebt er die Vorspannung auf und
+        // es bleibt nur die verheizte Leistung uebrig.
+        const int tens = (int)tension;
+        motor::set(constrain(lastPwmOut + (int)lastSteer + tens, -255, 255),
+                   constrain(lastPwmOut - (int)lastSteer - tens, -255, 255));
     }
     else if (swingActive)
     {

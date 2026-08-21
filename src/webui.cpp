@@ -185,7 +185,8 @@ const P = [
   ['upPwm','UPPWM',0,255,5,0,'g4'], ['upMax','UPMAX',0,80,1,0,'g4'],
   ['Dkp','DP',0,0.01,0.0002,4,'g5'], ['Dki','DI',0,0.004,0.0001,4,'g5'],
   ['shoveRate','SHOVE',20,300,5,0,'g6'], ['returnK','RK',0,3,0.05,2,'g6'],
-  ['returnVmax','RV',0,3000,50,0,'g6'], ['returnBiasMax','RMAX',0,12,0.5,1,'g6']
+  ['returnVmax','RV',0,3000,50,0,'g6'], ['returnBiasMax','RMAX',0,12,0.5,1,'g6'],
+  ['tension','TENS',0,60,1,0,'g1']
 ];
 const SIGNS = [['sign','SIGN','Motorrichtung','g1'],
                ['ysign','YSIGN','Drehrichtung','g2']];
@@ -338,7 +339,7 @@ function connect() {
                   Ykp:p[15],Ykd:p[16],Vkp:p[21],Vki:p[22],
                   upPwm:p[29],upMax:p[30],Dkp:p[34],Dki:p[35],
                   shoveRate:p[37],returnK:p[38],returnVmax:p[39],
-                  returnBiasMax:p[40]};
+                  returnBiasMax:p[40],tension:p[41]};
     for (const [id,,,,,dec] of P) {
       const el = document.getElementById(id);
       if (el !== document.activeElement) {
@@ -493,7 +494,7 @@ void webuiSendTelemetry()
     char buf[540];
     snprintf(buf, sizeof(buf),
              "T,%.2f,%.2f,%d,%d,%d,%d,%.2f,%.3f,%.2f,%.1f,%.2f,%.0f,%.2f,%d,%.2f,%.2f,%.0f"
-             ",%ld,%.0f,%.2f,%.4f,%.4f,%d,%d,%d,%.2f,%s,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%.4f,%.4f,%d,%.0f,%.2f,%.0f,%.1f",
+             ",%ld,%.0f,%.2f,%.4f,%.4f,%d,%d,%d,%.2f,%s,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%.4f,%.4f,%d,%.0f,%.2f,%.0f,%.1f,%.0f",
              angleDeg, gyroRateDs, lastPwmOut,
              running ? 1 : 0, requested ? 1 : 0, fallFlag ? 1 : 0,
              Kp, Ki, Kd, minPwm, trim, outSign,
@@ -503,6 +504,7 @@ void webuiSendTelemetry()
              autotuneBestCost(), autotunePhase(),
              swingActive ? 1 : 0, upPwm, upMax,
              driveSpeed, driveWish, turnRate, Dkp, Dki,
-             shoveActive ? 1 : 0, shoveRate, returnK, returnVmax, returnBiasMax);
+             shoveActive ? 1 : 0, shoveRate, returnK, returnVmax, returnBiasMax,
+             tension);
     ws.textAll(buf);
 }

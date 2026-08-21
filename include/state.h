@@ -20,6 +20,7 @@ extern float Ykp, Ykd, yawSign;
 
 // Reaktion auf einen Stoss: abfangen, dann zur Ausgangsstelle zurueck
 extern bool  shoveActive;
+extern float tension;
 extern float shoveRate, returnK, returnVmax, returnBiasMax;
 
 // Fahrbetrieb: Sollgeschwindigkeit und Solldrehrate
